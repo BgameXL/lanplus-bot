@@ -26,6 +26,7 @@ class Track:
     username: str
     minutes_ago: int
     player_name: str | None
+    position_ms: int = 0
 
 
 class SubsonicClient:
@@ -128,4 +129,5 @@ class SubsonicClient:
             username=entry.get("username") or "",
             minutes_ago=_as_int(entry.get("minutesAgo")) or 0,
             player_name=entry.get("playerName"),
+            position_ms=_as_int(entry.get("positionMs")) or 0,
         )

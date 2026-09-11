@@ -156,8 +156,9 @@ class NowPlayingBot(discord.Client):
         self.current_song_id: str | None = None
         self.current_track: Track | None = None
         self.current_color: int = config.embed_color
-        self.cover_url: str | None = None
+        self.cover_filename: str | None = None
         self.current_liked: bool = False
+        self.last_position_ms: int = 0
         self.now_playing_message: discord.Message | None = None
         self._resume_message: discord.Message | None = None
         self._resume_song_id: str | None = None
@@ -292,7 +293,13 @@ class NowPlayingBot(discord.Client):
             log.warning("Couldn't check favorite: %s", exc)
             return self.current_liked
 
-    @tasks.loop(seconds=15)  # el intervalo real se fija en setup_hook
+    def _previous_ended_normally(self) -> bool:
+        if self.current_track is None or not self.current_track.duration:
+            return False
+        duration_ms = self.current_track.duration * 1000
+        return self.last_position_ms >= duration_ms - 20000
+
+    @tasks.loop(seconds=15)
     async def update_now_playing(self) -> None:
         if self.target_channel is None or self.subsonic is None:
             return
@@ -306,35 +313,54 @@ class NowPlayingBot(discord.Client):
         song_id = track.id if (is_playing and track) else None
 
         if song_id != self.current_song_id:
-            await self._on_song_change(track, is_playing, song_id)
-        elif is_playing and self.now_playing_message is not None:
-            liked = await self._safe_is_starred(song_id)
-            if liked != self.current_liked:
-                self.current_liked = liked
-                embed = make_embed(
-                    self.config, self.current_track, self.cover_url,
-                    self.current_color, liked,
-                )
-                try:
-                    await self.now_playing_message.edit(embed=embed)
-                except discord.NotFound:
-                    self.now_playing_message = None
-                except discord.HTTPException as exc:
-                    log.warning("HTTP error editing entry: %s", exc)
+            ended_normally = self._previous_ended_normally()
+            await self._on_song_change(track, is_playing, song_id, ended_normally)
+        elif is_playing and track is not None:
+            self.last_position_ms = track.position_ms
+            if self.now_playing_message is not None:
+                liked = await self._safe_is_starred(song_id)
+                if liked != self.current_liked:
+                    self.current_liked = liked
+                    image_url = (
+                        f"attachment://{self.cover_filename}" if self.cover_filename else None
+                    )
+                    embed = make_embed(
+                        self.config, self.current_track, image_url,
+                        self.current_color, liked,
+                    )
+                    try:
+                        self.now_playing_message = await self.now_playing_message.edit(
+                            embed=embed, attachments=self.now_playing_message.attachments
+                        )
+                    except discord.NotFound:
+                        self.now_playing_message = None
+                    except discord.HTTPException as exc:
+                        log.warning("HTTP error editing entry: %s", exc)
 
-    async def _on_song_change(self, track, is_playing, song_id) -> None:
+    async def _on_song_change(self, track, is_playing, song_id, ended_normally) -> None:
         self.current_song_id = song_id
 
         if not (is_playing and track):
             self.current_track = None
-            self.cover_url = None
+            self.cover_filename = None
             self.current_liked = False
+            self.last_position_ms = 0
             self.now_playing_message = None
             await self._clear_presence()
             log.info("Idle (nothing playing).")
             return
 
+        resume = self._resume_message if (
+                self._resume_message is not None and song_id == self._resume_song_id
+        ) else None
+        self._resume_message = None
+        self._resume_song_id = None
+        target = resume
+        if target is None and ended_normally and self.now_playing_message is not None:
+            target = self.now_playing_message
+
         self.current_track = track
+        self.last_position_ms = track.position_ms
         cover_bytes = None
         if track.cover_art:
             try:
@@ -345,23 +371,18 @@ class NowPlayingBot(discord.Client):
         self.current_liked = await self._safe_is_starred(song_id)
         await self._set_presence(track)
 
-        resume = self._resume_message if (
-            self._resume_message is not None and song_id == self._resume_song_id
-        ) else None
-        self._resume_message = None
-        self._resume_song_id = None
-
         file = None
+        self.cover_filename = None
         image_url = None
         if cover_bytes:
-            filename = f"cover_{_safe_id(track.id)}.jpg"
-            file = discord.File(io.BytesIO(cover_bytes), filename=filename)
-            image_url = f"attachment://{filename}"
+            self.cover_filename = f"cover_{_safe_id(track.id)}.jpg"
+            file = discord.File(io.BytesIO(cover_bytes), filename=self.cover_filename)
+            image_url = f"attachment://{self.cover_filename}"
         embed = make_embed(self.config, track, image_url, self.current_color, self.current_liked)
 
         try:
-            if resume is not None:
-                self.now_playing_message = await resume.edit(
+            if target is not None:
+                self.now_playing_message = await target.edit(
                     embed=embed, attachments=[file] if file else []
                 )
             else:
@@ -377,7 +398,7 @@ class NowPlayingBot(discord.Client):
             kwargs = {"embed": embed}
             if cover_bytes:
                 kwargs["file"] = discord.File(
-                    io.BytesIO(cover_bytes), filename=f"cover_{_safe_id(track.id)}.jpg"
+                    io.BytesIO(cover_bytes), filename=self.cover_filename or "cover.jpg"
                 )
             self.now_playing_message = await self.target_channel.send(**kwargs)
         except discord.HTTPException as exc:
@@ -385,10 +406,6 @@ class NowPlayingBot(discord.Client):
             self.now_playing_message = None
             return
 
-        self.cover_url = (
-            self.now_playing_message.attachments[0].url
-            if self.now_playing_message.attachments else None
-        )
         _save_state(self.config.state_file, {
             "channel_id": self.target_channel.id,
             "message_id": self.now_playing_message.id,
@@ -396,7 +413,7 @@ class NowPlayingBot(discord.Client):
         })
         log.info(
             "Now listening: %s - %s%s",
-            track.artist, track.title, "if self.current_liked else",
+            track.artist, track.title, " (fav)" if self.current_liked else "",
         )
 
     async def _set_presence(self, track: Track) -> None:
