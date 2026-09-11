@@ -22,7 +22,7 @@ Discord bot that posts what you are listening to on Navidrome.
 
 ## Requirements
 
-- Python 3.11+.
+- Python 3.14+.
 - A Navidrome server.
 - A client that reports to Navidrome.
 
