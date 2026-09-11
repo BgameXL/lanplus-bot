@@ -1,0 +1,11 @@
+# No metas nada de esto en la imagen (secretos, entorno local, basura).
+.venv/
+__pycache__/
+*.pyc
+.env
+state.json
+data/
+.git/
+.gitignore
+.idea/
+*.iml
