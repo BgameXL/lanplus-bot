@@ -180,6 +180,47 @@ def build_share_embed(track: Track, url: str, image_url: str | None, color: int)
     return embed
 
 
+class LibraryView(discord.ui.View):
+    def __init__(self, bot: "NowPlayingBot", author_id: int) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.author_id = author_id
+        self.offset = 0
+        self.page_size = 10
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This isn't your list.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    async def _update(self, interaction: discord.Interaction) -> None:
+        embed, has_more = await self.bot._library_page(self.offset, self.page_size)
+        self.prev.disabled = self.offset == 0
+        self.next.disabled = not has_more
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(emoji="◀", style=discord.ButtonStyle.secondary)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.offset = max(0, self.offset - self.page_size)
+        await self._update(interaction)
+
+    @discord.ui.button(emoji="▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.offset += self.page_size
+        await self._update(interaction)
+
+
 class NowPlayingBot(discord.Client):
     def __init__(self, config: Config) -> None:
         super().__init__(intents=discord.Intents.default())
@@ -236,6 +277,15 @@ class NowPlayingBot(discord.Client):
         @self.tree.command(name="lyrics", description="Lyrics of the current song")
         async def lyrics(interaction: discord.Interaction) -> None:
             await self._handle_lyrics(interaction)
+
+        @self.tree.command(name="search", description="Search the library")
+        @app_commands.describe(query="Title, artist or album to search for")
+        async def search(interaction: discord.Interaction, query: str) -> None:
+            await self._handle_search(interaction, query)
+
+        @self.tree.command(name="list", description="Browse the library")
+        async def list_cmd(interaction: discord.Interaction) -> None:
+            await self._handle_list(interaction)
 
     async def _handle_nowplaying(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
@@ -331,6 +381,77 @@ class NowPlayingBot(discord.Client):
                     "applications.commands scope): %s",
                     exc,
                 )
+
+    async def _handle_search(self, interaction: discord.Interaction, query: str) -> None:
+        await interaction.response.defer()
+        try:
+            res = await self.subsonic.search(query)
+        except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            await interaction.followup.send(f"Could not reach Navidrome: {exc}")
+            return
+
+        def _as_list(value) -> list:
+            return [value] if isinstance(value, dict) else (value or [])
+
+        songs = _as_list(res.get("song"))
+        albums = _as_list(res.get("album"))
+        artists = _as_list(res.get("artist"))
+        if not songs and not albums and not artists:
+            await interaction.followup.send(f"No results for **{query}**.")
+            return
+
+        embed = discord.Embed(title=f"Search: {query}", color=self.config.embed_color)
+        if songs:
+            lines = [
+                f"**{s.get('title')}** — {s.get('artist')} · _{s.get('album')}_"
+                f"  `{_mmss(s.get('duration') or 0)}`"
+                for s in songs[:10]
+            ]
+            embed.add_field(name="🎵 Songs", value="\n".join(lines)[:1024], inline=False)
+        if albums:
+            embed.add_field(
+                name="💿 Albums",
+                value="\n".join(f"**{a.get('name')}** — {a.get('artist')}" for a in albums[:5])[:1024],
+                inline=False,
+            )
+        if artists:
+            embed.add_field(
+                name="🎤 Artists",
+                value=", ".join(a.get("name", "") for a in artists[:5])[:1024],
+                inline=False,
+            )
+        embed.set_footer(text="Navidrome")
+        await interaction.followup.send(embed=embed)
+
+    async def _handle_list(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        view = LibraryView(self, interaction.user.id)
+        embed, has_more = await self._library_page(view.offset, view.page_size)
+        view.prev.disabled = True
+        view.next.disabled = not has_more
+        view.message = await interaction.followup.send(embed=embed, view=view)
+
+    async def _library_page(self, offset: int, size: int) -> tuple[discord.Embed, bool]:
+        try:
+            albums = await self.subsonic.album_list(offset, size)
+        except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning("Error listing library: %s", exc)
+            albums = []
+        embed = discord.Embed(title="Library — albums (A→Z)", color=self.config.embed_color)
+        if not albums:
+            embed.description = "No albums here."
+        else:
+            lines = []
+            for i, album in enumerate(albums, start=offset + 1):
+                year = f" ({album.get('year')})" if album.get("year") else ""
+                count = album.get("songCount")
+                tail = f" · {count} tracks" if count else ""
+                lines.append(
+                    f"`{i:>4}.` **{album.get('name')}** — {album.get('artist')}{year}{tail}"
+                )
+            embed.description = "\n".join(lines)[:4096]
+        embed.set_footer(text=f"Navidrome • from #{offset + 1}")
+        return embed, len(albums) == size
 
     async def _safe_is_starred(self, song_id: str) -> bool:
         try:

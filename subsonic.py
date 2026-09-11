@@ -137,6 +137,28 @@ class SubsonicClient:
         text = "\n".join(ln.get("value", "") for ln in lines).strip()
         return text or None
 
+    async def search(self, query: str, song_count: int = 10,
+                     album_count: int = 5, artist_count: int = 5) -> dict:
+        body = await self._get_json("search3.view", {
+            "query": query,
+            "songCount": str(song_count),
+            "albumCount": str(album_count),
+            "artistCount": str(artist_count),
+        })
+        return body.get("searchResult3") or {}
+
+    async def album_list(self, offset: int = 0, size: int = 10,
+                         list_type: str = "alphabeticalByName") -> list[dict]:
+        body = await self._get_json("getAlbumList2.view", {
+            "type": list_type,
+            "size": str(size),
+            "offset": str(offset),
+        })
+        albums = (body.get("albumList2") or {}).get("album") or []
+        if isinstance(albums, dict):
+            albums = [albums]
+        return albums
+
     @staticmethod
     def _parse_entry(entry: dict) -> Track:
         def _as_int(value) -> int | None:
