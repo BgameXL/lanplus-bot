@@ -162,6 +162,24 @@ def build_metadata_embed(config: Config, track: Track, song: dict) -> discord.Em
     return embed
 
 
+def build_share_embed(track: Track, url: str, image_url: str | None, color: int) -> discord.Embed:
+    embed = discord.Embed(title=track.title, url=url, color=color)
+    embed.set_author(name="Shared")
+    embed.description = url
+    embed.add_field(name="Artist", value=track.artist or "—", inline=True)
+    if track.album:
+        embed.add_field(name="Album", value=track.album, inline=True)
+    if track.year:
+        embed.add_field(name="Year", value=str(track.year), inline=True)
+    if track.duration:
+        embed.add_field(name="Duration", value=_mmss(track.duration), inline=True)
+    if image_url:
+        embed.set_image(url=image_url)
+    embed.set_footer(text="Navidrome")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+
 class NowPlayingBot(discord.Client):
     def __init__(self, config: Config) -> None:
         super().__init__(intents=discord.Intents.default())
@@ -343,15 +361,34 @@ class NowPlayingBot(discord.Client):
             await interaction.followup.send("Nothing playing right now.")
             return
         if track.id == self.current_song_id and self.current_share_url:
-            url = self.current_share_url
+            url = self.current_share_url  # reutiliza el del feed si es la misma canción
         else:
             url = await self._safe_create_share(track.id)
-        if url:
-            await interaction.followup.send(f"🔗 **{track.artist} — {track.title}**\n{url}")
-        else:
+        if not url:
             await interaction.followup.send(
                 "Couldn't create a share link (is sharing enabled in Navidrome?)."
             )
+            return
+
+        cover = None
+        if track.cover_art:
+            try:
+                cover = await self.subsonic.cover_art(track.cover_art, self.config.cover_size)
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+        color = dominant_color(cover, self.config.embed_color)
+
+        file = None
+        image_url = None
+        if cover:
+            filename = f"cover_{_safe_id(track.id)}.jpg"
+            file = discord.File(io.BytesIO(cover), filename=filename)
+            image_url = f"attachment://{filename}"
+        embed = build_share_embed(track, url, image_url, color)
+        if file:
+            await interaction.followup.send(embed=embed, file=file)
+        else:
+            await interaction.followup.send(embed=embed)
 
     async def _handle_lyrics(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
@@ -385,7 +422,7 @@ class NowPlayingBot(discord.Client):
         ]
         embeds[0].set_author(name="Lyrics")
         await interaction.followup.send(
-            content=f"🎤 **{track.artist} — {track.title}**", embeds=embeds
+            content=f"**{track.artist} — {track.title}**", embeds=embeds
         )
 
     def _previous_ended_normally(self) -> bool:
