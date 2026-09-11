@@ -157,6 +157,7 @@ class NowPlayingBot(discord.Client):
         self.current_track: Track | None = None
         self.current_color: int = config.embed_color
         self.cover_filename: str | None = None
+        self.cover_bytes: bytes | None = None
         self.current_liked: bool = False
         self.last_position_ms: int = 0
         self.now_playing_message: discord.Message | None = None
@@ -328,9 +329,14 @@ class NowPlayingBot(discord.Client):
                         self.config, self.current_track, image_url,
                         self.current_color, liked,
                     )
+                    attachments = []
+                    if self.cover_bytes and self.cover_filename:
+                        attachments = [
+                            discord.File(io.BytesIO(self.cover_bytes), filename=self.cover_filename)
+                        ]
                     try:
                         self.now_playing_message = await self.now_playing_message.edit(
-                            embed=embed, attachments=self.now_playing_message.attachments
+                            embed=embed, attachments=attachments
                         )
                     except discord.NotFound:
                         self.now_playing_message = None
@@ -343,6 +349,7 @@ class NowPlayingBot(discord.Client):
         if not (is_playing and track):
             self.current_track = None
             self.cover_filename = None
+            self.cover_bytes = None
             self.current_liked = False
             self.last_position_ms = 0
             self.now_playing_message = None
@@ -367,6 +374,7 @@ class NowPlayingBot(discord.Client):
                 cover_bytes = await self.subsonic.cover_art(track.cover_art, self.config.cover_size)
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 log.warning("Couldn't download cover: %s", exc)
+        self.cover_bytes = cover_bytes
         self.current_color = dominant_color(cover_bytes, self.config.embed_color)
         self.current_liked = await self._safe_is_starred(song_id)
         await self._set_presence(track)
