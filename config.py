@@ -47,6 +47,7 @@ class Config:
     navidrome_user: str
     navidrome_pass: str
     username_filter: str | None
+    display_name: str
     poll_interval: int
     idle_after: int
     embed_color: int
@@ -72,6 +73,7 @@ def load_config() -> Config:
         navidrome_user=user,
         navidrome_pass=_required("NAVIDROME_PASS"),
         username_filter=os.getenv("NAVIDROME_USERNAME_FILTER") or user,
+        display_name=os.getenv("DISPLAY_NAME") or os.getenv("NAVIDROME_USERNAME_FILTER") or user,
         poll_interval=max(5, _parse_int("POLL_INTERVAL", 15)),
         idle_after=_parse_int("IDLE_AFTER_MINUTES", 10),
         embed_color=_parse_color(os.getenv("EMBED_COLOR")),

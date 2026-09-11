@@ -4,7 +4,6 @@ import asyncio
 import io
 import json
 import logging
-import time
 from pathlib import Path
 
 import aiohttp
@@ -47,20 +46,12 @@ def _mmss(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def _progress_bar(elapsed: int, total: int, length: int = 18) -> str:
-    if not total or total <= 0:
-        return ""
-    frac = min(max(elapsed / total, 0.0), 1.0)
-    pos = round(frac * (length - 1))
-    return "─" * pos + "🔘" + "─" * (length - 1 - pos)
-
-
 def make_embed(
         config: Config,
         track: Track | None,
         image_url: str | None,
-        elapsed: int,
         color: int,
+        liked: bool,
 ) -> discord.Embed:
     if track is None:
         embed = discord.Embed(
@@ -74,16 +65,20 @@ def make_embed(
 
     embed = discord.Embed(title=track.title, color=color)
     embed.set_author(name="Now listening")
-
-    if track.duration:
-        bar = _progress_bar(elapsed, track.duration)
-        embed.description = f"`{_mmss(elapsed)}` {bar} `{_mmss(track.duration)}`"
-
     embed.add_field(name="Artist", value=track.artist or "—", inline=True)
     if track.album:
         embed.add_field(name="Album", value=track.album, inline=True)
     if track.year:
         embed.add_field(name="Year", value=str(track.year), inline=True)
+    if track.duration:
+        embed.add_field(name="Duration", value=_mmss(track.duration), inline=True)
+
+    if liked:
+        embed.add_field(
+            name="​",
+            value=f"{config.display_name} likes this song!",
+            inline=False,
+        )
 
     if image_url:
         embed.set_image(url=image_url)
@@ -93,6 +88,59 @@ def make_embed(
         footer.append(f"▶ {track.player_name}")
     footer.append("Navidrome")
     embed.set_footer(text="  •  ".join(footer))
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+
+def build_metadata_embed(config: Config, track: Track, song: dict) -> discord.Embed:
+    embed = discord.Embed(title=song.get("title") or track.title, color=config.embed_color)
+    embed.set_author(name="Metadata")
+
+    def add(name: str, value, inline: bool = True) -> None:
+        if value not in (None, "", [], 0):
+            embed.add_field(name=name, value=str(value), inline=inline)
+
+    add("Artist", song.get("displayArtist") or song.get("artist") or track.artist)
+    add("Album", song.get("album") or track.album)
+    album_artist = song.get("displayAlbumArtist")
+    if album_artist and album_artist != (song.get("displayArtist") or song.get("artist")):
+        add("Album Artist", album_artist)
+    add("Year", song.get("year") or track.year)
+
+    genre = song.get("genre")
+    if not genre:
+        genre = ", ".join(
+            g.get("name", "") for g in (song.get("genres") or []) if isinstance(g, dict)
+        )
+    add("Genre", genre)
+
+    add("Track", song.get("track"))
+    add("Disc", song.get("discNumber"))
+    add("Duration", _mmss(song["duration"]) if song.get("duration") else None)
+
+    fmt = " / ".join(x for x in [(song.get("suffix") or "").upper(), song.get("contentType") or ""] if x)
+    add("Format", fmt)
+    add("Bitrate", f"{song['bitRate']} kbps" if song.get("bitRate") else None)
+    if song.get("samplingRate"):
+        rate = f"{song['samplingRate'] / 1000:.1f} kHz"
+        if song.get("bitDepth"):
+            rate += f" / {song['bitDepth']}-bit"
+        add("Sample rate", rate)
+    add("Channels", song.get("channelCount"))
+    add("Size", f"{song['size'] / 1048576:.1f} MB" if song.get("size") else None)
+    add("BPM", song.get("bpm"))
+
+    isrc = song.get("isrc")
+    add("ISRC", ", ".join(isrc) if isinstance(isrc, list) else isrc)
+    add("MusicBrainz", song.get("musicBrainzId"))
+    add("Comment", song.get("comment"))
+    add("Explicit", song.get("explicitStatus"))
+
+    starred = song.get("starred")
+    add("Starred", f"{starred[:10]}" if starred else "No")
+    add("Added", (song.get("created") or "")[:10])
+
+    embed.set_footer(text="Navidrome")
     embed.timestamp = discord.utils.utcnow()
     return embed
 
@@ -109,7 +157,7 @@ class NowPlayingBot(discord.Client):
         self.current_track: Track | None = None
         self.current_color: int = config.embed_color
         self.cover_url: str | None = None
-        self.song_started_at: float | None = None
+        self.current_liked: bool = False
         self.now_playing_message: discord.Message | None = None
         self._resume_message: discord.Message | None = None
         self._resume_song_id: str | None = None
@@ -139,6 +187,10 @@ class NowPlayingBot(discord.Client):
         async def nowplaying(interaction: discord.Interaction) -> None:
             await self._handle_nowplaying(interaction)
 
+        @self.tree.command(name="metadata", description="Full metadata of the current song")
+        async def metadata(interaction: discord.Interaction) -> None:
+            await self._handle_metadata(interaction)
+
     async def _handle_nowplaying(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         try:
@@ -160,10 +212,7 @@ class NowPlayingBot(discord.Client):
                 pass
 
         color = dominant_color(cover, self.config.embed_color)
-        if self.current_song_id == track.id and self.song_started_at is not None:
-            elapsed = self._elapsed()
-        else:
-            elapsed = min(track.minutes_ago * 60, track.duration or 0)
+        liked = await self._safe_is_starred(track.id)
 
         filename = None
         file = None
@@ -172,11 +221,30 @@ class NowPlayingBot(discord.Client):
             file = discord.File(io.BytesIO(cover), filename=filename)
 
         image_url = f"attachment://{filename}" if filename else None
-        embed = make_embed(self.config, track, image_url, elapsed, color)
+        embed = make_embed(self.config, track, image_url, color, liked)
         if file:
             await interaction.followup.send(embed=embed, file=file)
         else:
             await interaction.followup.send(embed=embed)
+
+    async def _handle_metadata(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            track = await self.subsonic.now_playing(self.config.username_filter)
+        except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            await interaction.followup.send(f"Could not reach Navidrome: {exc}")
+            return
+
+        is_playing = track is not None and track.minutes_ago <= self.config.idle_after
+        if not is_playing or track is None:
+            await interaction.followup.send("Nothing playing right now.")
+            return
+
+        try:
+            song = await self.subsonic.get_song(track.id)
+        except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError):
+            song = {}
+        await interaction.followup.send(embed=build_metadata_embed(self.config, track, song))
 
     async def on_ready(self) -> None:
         log.info("Connected as %s (id %s)", self.user, self.user.id)
@@ -217,15 +285,14 @@ class NowPlayingBot(discord.Client):
                     exc,
                 )
 
-    def _elapsed(self) -> int:
-        if self.song_started_at is None:
-            return 0
-        elapsed = time.monotonic() - self.song_started_at
-        if self.current_track and self.current_track.duration:
-            elapsed = min(elapsed, self.current_track.duration)
-        return max(0, int(elapsed))
+    async def _safe_is_starred(self, song_id: str) -> bool:
+        try:
+            return await self.subsonic.is_starred(song_id)
+        except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning("Couldn't check favorite: %s", exc)
+            return self.current_liked
 
-    @tasks.loop(seconds=15)
+    @tasks.loop(seconds=15)  # el intervalo real se fija en setup_hook
     async def update_now_playing(self) -> None:
         if self.target_channel is None or self.subsonic is None:
             return
@@ -241,32 +308,33 @@ class NowPlayingBot(discord.Client):
         if song_id != self.current_song_id:
             await self._on_song_change(track, is_playing, song_id)
         elif is_playing and self.now_playing_message is not None:
-            embed = make_embed(
-                self.config, self.current_track, self.cover_url,
-                self._elapsed(), self.current_color,
-            )
-            try:
-                await self.now_playing_message.edit(embed=embed)
-            except discord.NotFound:
-                self.now_playing_message = None
-            except discord.HTTPException as exc:
-                log.warning("HTTP error editing entry: %s", exc)
+            liked = await self._safe_is_starred(song_id)
+            if liked != self.current_liked:
+                self.current_liked = liked
+                embed = make_embed(
+                    self.config, self.current_track, self.cover_url,
+                    self.current_color, liked,
+                )
+                try:
+                    await self.now_playing_message.edit(embed=embed)
+                except discord.NotFound:
+                    self.now_playing_message = None
+                except discord.HTTPException as exc:
+                    log.warning("HTTP error editing entry: %s", exc)
 
     async def _on_song_change(self, track, is_playing, song_id) -> None:
         self.current_song_id = song_id
 
         if not (is_playing and track):
             self.current_track = None
-            self.song_started_at = None
             self.cover_url = None
+            self.current_liked = False
             self.now_playing_message = None
             await self._clear_presence()
             log.info("Idle (nothing playing).")
             return
 
         self.current_track = track
-        self.song_started_at = time.monotonic() - track.minutes_ago * 60
-
         cover_bytes = None
         if track.cover_art:
             try:
@@ -274,10 +342,11 @@ class NowPlayingBot(discord.Client):
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 log.warning("Couldn't download cover: %s", exc)
         self.current_color = dominant_color(cover_bytes, self.config.embed_color)
+        self.current_liked = await self._safe_is_starred(song_id)
         await self._set_presence(track)
 
         resume = self._resume_message if (
-                self._resume_message is not None and song_id == self._resume_song_id
+            self._resume_message is not None and song_id == self._resume_song_id
         ) else None
         self._resume_message = None
         self._resume_song_id = None
@@ -288,7 +357,7 @@ class NowPlayingBot(discord.Client):
             filename = f"cover_{_safe_id(track.id)}.jpg"
             file = discord.File(io.BytesIO(cover_bytes), filename=filename)
             image_url = f"attachment://{filename}"
-        embed = make_embed(self.config, track, image_url, self._elapsed(), self.current_color)
+        embed = make_embed(self.config, track, image_url, self.current_color, self.current_liked)
 
         try:
             if resume is not None:
@@ -306,9 +375,10 @@ class NowPlayingBot(discord.Client):
             return
         except discord.NotFound:
             kwargs = {"embed": embed}
-            if file is not None:
-                file = discord.File(io.BytesIO(cover_bytes), filename=f"cover_{_safe_id(track.id)}.jpg")
-                kwargs["file"] = file
+            if cover_bytes:
+                kwargs["file"] = discord.File(
+                    io.BytesIO(cover_bytes), filename=f"cover_{_safe_id(track.id)}.jpg"
+                )
             self.now_playing_message = await self.target_channel.send(**kwargs)
         except discord.HTTPException as exc:
             log.warning("HTTP error posting entry: %s", exc)
@@ -324,7 +394,10 @@ class NowPlayingBot(discord.Client):
             "message_id": self.now_playing_message.id,
             "song_id": song_id,
         })
-        log.info("Now listening: %s - %s", track.artist, track.title)
+        log.info(
+            "Now listening: %s - %s%s",
+            track.artist, track.title, "if self.current_liked else",
+        )
 
     async def _set_presence(self, track: Track) -> None:
         name = f"{track.title} · {track.artist}"[:128]

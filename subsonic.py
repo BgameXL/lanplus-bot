@@ -101,6 +101,14 @@ class SubsonicClient:
                 return None
             return await resp.read()
 
+    async def get_song(self, song_id: str) -> dict:
+        body = await self._get_json("getSong.view", {"id": song_id})
+        return body.get("song") or {}
+
+    async def is_starred(self, song_id: str) -> bool:
+        song = await self.get_song(song_id)
+        return bool(song.get("starred"))
+
     @staticmethod
     def _parse_entry(entry: dict) -> Track:
         def _as_int(value) -> int | None:
