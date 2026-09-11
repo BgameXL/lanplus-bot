@@ -102,7 +102,7 @@ def make_embed(
 
     footer = []
     if track.player_name:
-        footer.append(f"▶ {track.player_name}")
+        footer.append(track.player_name)
     footer.append("Navidrome")
     embed.set_footer(text="  •  ".join(footer))
     embed.timestamp = discord.utils.utcnow()
@@ -210,12 +210,12 @@ class LibraryView(discord.ui.View):
         self.next.disabled = not has_more
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(emoji="◀", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary)
     async def prev(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         self.offset = max(0, self.offset - self.page_size)
         await self._update(interaction)
 
-    @discord.ui.button(emoji="▶", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
     async def next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         self.offset += self.page_size
         await self._update(interaction)
@@ -407,16 +407,16 @@ class NowPlayingBot(discord.Client):
                 f"  `{_mmss(s.get('duration') or 0)}`"
                 for s in songs[:10]
             ]
-            embed.add_field(name="🎵 Songs", value="\n".join(lines)[:1024], inline=False)
+            embed.add_field(name="Songs", value="\n".join(lines)[:1024], inline=False)
         if albums:
             embed.add_field(
-                name="💿 Albums",
+                name="Albums",
                 value="\n".join(f"**{a.get('name')}** — {a.get('artist')}" for a in albums[:5])[:1024],
                 inline=False,
             )
         if artists:
             embed.add_field(
-                name="🎤 Artists",
+                name="Artists",
                 value=", ".join(a.get("name", "") for a in artists[:5])[:1024],
                 inline=False,
             )
@@ -437,7 +437,7 @@ class NowPlayingBot(discord.Client):
         except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
             log.warning("Error listing library: %s", exc)
             albums = []
-        embed = discord.Embed(title="Library — albums (A→Z)", color=self.config.embed_color)
+        embed = discord.Embed(title="Library - albums", color=self.config.embed_color)
         if not albums:
             embed.description = "No albums here."
         else:
@@ -482,7 +482,7 @@ class NowPlayingBot(discord.Client):
             await interaction.followup.send("Nothing playing right now.")
             return
         if track.id == self.current_song_id and self.current_share_url:
-            url = self.current_share_url  # reutiliza el del feed si es la misma canción
+            url = self.current_share_url
         else:
             url = await self._safe_create_share(track.id)
         if not url:
