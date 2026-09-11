@@ -60,7 +60,7 @@ def _progress_bar(elapsed: int, total: int, length: int = 18) -> str:
 def make_embed(
         config: Config,
         track: Track | None,
-        cover_filename: str | None,
+        image_url: str | None,
         elapsed: int,
         color: int,
 ) -> discord.Embed:
@@ -87,8 +87,8 @@ def make_embed(
     if track.year:
         embed.add_field(name="Year", value=str(track.year), inline=True)
 
-    if cover_filename:
-        embed.set_image(url=f"attachment://{cover_filename}")
+    if image_url:
+        embed.set_image(url=image_url)
 
     footer = []
     if track.player_name:
@@ -113,6 +113,7 @@ class NowPlayingBot(discord.Client):
         self.current_color: int = config.embed_color
         self.cover_bytes: bytes | None = None
         self.cover_filename: str | None = None
+        self.cover_url: str | None = None
         self.song_started_at: float | None = None
 
         self._restored = False
@@ -173,7 +174,8 @@ class NowPlayingBot(discord.Client):
             filename = f"cover_{_safe_id(track.id)}.jpg"
             file = discord.File(io.BytesIO(cover), filename=filename)
 
-        embed = make_embed(self.config, track, filename, elapsed, color)
+        image_url = f"attachment://{filename}" if filename else None
+        embed = make_embed(self.config, track, image_url, elapsed, color)
         if file:
             await interaction.followup.send(embed=embed, file=file)
         else:
@@ -243,13 +245,13 @@ class NowPlayingBot(discord.Client):
         is_playing = track is not None and track.minutes_ago <= self.config.idle_after
         song_id = track.id if (is_playing and track) else None
 
-        if song_id != self.current_song_id:
+        if song_id != self.current_song_id or self.now_playing_message is None:
             await self._on_state_change(track, is_playing, song_id)
         elif is_playing:
             embed = make_embed(
                 self.config,
                 self.current_track,
-                self.cover_filename,
+                self.cover_url,
                 self._elapsed(),
                 self.current_color,
             )
@@ -284,16 +286,22 @@ class NowPlayingBot(discord.Client):
             log.info("Idle (nothing playing).")
 
         file = None
+        image_url = None
         if self.cover_bytes and self.cover_filename:
             file = discord.File(io.BytesIO(self.cover_bytes), filename=self.cover_filename)
+            image_url = f"attachment://{self.cover_filename}"
         embed = make_embed(
             self.config,
             self.current_track,
-            self.cover_filename,
+            image_url,
             self._elapsed(),
             self.current_color,
         )
         await self._publish(embed, file, new_attachment=True)
+        if self.now_playing_message and self.now_playing_message.attachments:
+            self.cover_url = self.now_playing_message.attachments[0].url
+        else:
+            self.cover_url = None
 
     async def _set_presence(self, track: Track) -> None:
         name = f"{track.title} · {track.artist}"[:128]
