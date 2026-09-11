@@ -91,9 +91,11 @@ class SubsonicClient:
         tracks.sort(key=lambda t: t.minutes_ago)
         return tracks[0]
 
-    async def cover_art(self, cover_id: str, size: int = 512) -> bytes | None:
+    async def cover_art(self, cover_id: str, size: int = 1000) -> bytes | None:
         params = self._auth_params()
-        params.update({"id": cover_id, "size": str(size)})
+        params["id"] = cover_id
+        if size and size > 0:
+            params["size"] = str(size)
         url = f"{self._base}/rest/getCoverArt.view"
         async with self._session.get(url, params=params, timeout=self._timeout) as resp:
             resp.raise_for_status()
@@ -109,6 +111,31 @@ class SubsonicClient:
     async def is_starred(self, song_id: str) -> bool:
         song = await self.get_song(song_id)
         return bool(song.get("starred"))
+
+    async def create_share(self, song_id: str, expires_ms: int | None = None) -> str | None:
+        extra = {"id": song_id}
+        if expires_ms:
+            extra["expires"] = str(expires_ms)
+        try:
+            body = await self._get_json("createShare.view", extra)
+        except SubsonicError:
+            return None
+        shares = (body.get("shares") or {}).get("share") or []
+        if isinstance(shares, dict):
+            shares = [shares]
+        return shares[0].get("url") if shares else None
+
+    async def get_lyrics(self, song_id: str) -> str | None:
+        try:
+            body = await self._get_json("getLyricsBySongId.view", {"id": song_id})
+        except SubsonicError:
+            return None
+        structured = (body.get("lyricsList") or {}).get("structuredLyrics") or []
+        if not structured:
+            return None
+        lines = structured[0].get("line") or []
+        text = "\n".join(ln.get("value", "") for ln in lines).strip()
+        return text or None
 
     @staticmethod
     def _parse_entry(entry: dict) -> Track:

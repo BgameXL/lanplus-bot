@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 def _required(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -52,6 +53,7 @@ class Config:
     idle_after: int
     embed_color: int
     cover_size: int
+    share_expires_days: int
     state_file: str
 
 
@@ -77,6 +79,7 @@ def load_config() -> Config:
         poll_interval=max(5, _parse_int("POLL_INTERVAL", 15)),
         idle_after=_parse_int("IDLE_AFTER_MINUTES", 10),
         embed_color=_parse_color(os.getenv("EMBED_COLOR")),
-        cover_size=_parse_int("COVER_SIZE", 512),
+        cover_size=_parse_int("COVER_SIZE", 1000),
+        share_expires_days=_parse_int("SHARE_EXPIRES_DAYS", 0),
         state_file=os.getenv("STATE_FILE", "state.json"),
     )

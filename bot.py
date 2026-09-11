@@ -4,8 +4,8 @@ import asyncio
 import io
 import json
 import logging
+import time
 from pathlib import Path
-
 import aiohttp
 import discord
 from discord import app_commands
@@ -13,6 +13,7 @@ from discord.ext import tasks
 
 from colors import dominant_color
 from config import Config, load_config
+from lyrics import fetch_lrclib
 from subsonic import SubsonicClient, SubsonicError, Track
 
 logging.basicConfig(
@@ -46,12 +47,28 @@ def _mmss(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def _chunk_text(text: str, size: int) -> list[str]:
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines():
+        if len(current) + len(line) + 1 > size:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        chunks.append(current)
+    return [c[:size] for c in chunks] or [text[:size]]
+
+
 def make_embed(
         config: Config,
         track: Track | None,
         image_url: str | None,
         color: int,
         liked: bool,
+        share_url: str | None = None,
 ) -> discord.Embed:
     if track is None:
         embed = discord.Embed(
@@ -63,7 +80,7 @@ def make_embed(
         embed.timestamp = discord.utils.utcnow()
         return embed
 
-    embed = discord.Embed(title=track.title, color=color)
+    embed = discord.Embed(title=track.title, url=share_url or None, color=color)
     embed.set_author(name="Now listening")
     embed.add_field(name="Artist", value=track.artist or "—", inline=True)
     if track.album:
@@ -158,6 +175,7 @@ class NowPlayingBot(discord.Client):
         self.current_color: int = config.embed_color
         self.cover_filename: str | None = None
         self.cover_bytes: bytes | None = None
+        self.current_share_url: str | None = None
         self.current_liked: bool = False
         self.last_position_ms: int = 0
         self.now_playing_message: discord.Message | None = None
@@ -193,6 +211,14 @@ class NowPlayingBot(discord.Client):
         async def metadata(interaction: discord.Interaction) -> None:
             await self._handle_metadata(interaction)
 
+        @self.tree.command(name="share", description="Public share link for the current song")
+        async def share(interaction: discord.Interaction) -> None:
+            await self._handle_share(interaction)
+
+        @self.tree.command(name="lyrics", description="Lyrics of the current song")
+        async def lyrics(interaction: discord.Interaction) -> None:
+            await self._handle_lyrics(interaction)
+
     async def _handle_nowplaying(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         try:
@@ -223,7 +249,8 @@ class NowPlayingBot(discord.Client):
             file = discord.File(io.BytesIO(cover), filename=filename)
 
         image_url = f"attachment://{filename}" if filename else None
-        embed = make_embed(self.config, track, image_url, color, liked)
+        share_url = self.current_share_url if track.id == self.current_song_id else None
+        embed = make_embed(self.config, track, image_url, color, liked, share_url)
         if file:
             await interaction.followup.send(embed=embed, file=file)
         else:
@@ -294,6 +321,73 @@ class NowPlayingBot(discord.Client):
             log.warning("Couldn't check favorite: %s", exc)
             return self.current_liked
 
+    async def _safe_create_share(self, song_id: str) -> str | None:
+        expires_ms = None
+        if self.config.share_expires_days > 0:
+            expires_ms = int((time.time() + self.config.share_expires_days * 86400) * 1000)
+        try:
+            return await self.subsonic.create_share(song_id, expires_ms)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning("Couldn't create share: %s", exc)
+            return None
+
+    async def _handle_share(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            track = await self.subsonic.now_playing(self.config.username_filter)
+        except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            await interaction.followup.send(f"Could not reach Navidrome: {exc}")
+            return
+        is_playing = track is not None and track.minutes_ago <= self.config.idle_after
+        if not is_playing or track is None:
+            await interaction.followup.send("Nothing playing right now.")
+            return
+        if track.id == self.current_song_id and self.current_share_url:
+            url = self.current_share_url
+        else:
+            url = await self._safe_create_share(track.id)
+        if url:
+            await interaction.followup.send(f"🔗 **{track.artist} — {track.title}**\n{url}")
+        else:
+            await interaction.followup.send(
+                "Couldn't create a share link (is sharing enabled in Navidrome?)."
+            )
+
+    async def _handle_lyrics(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            track = await self.subsonic.now_playing(self.config.username_filter)
+        except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            await interaction.followup.send(f"Could not reach Navidrome: {exc}")
+            return
+        is_playing = track is not None and track.minutes_ago <= self.config.idle_after
+        if not is_playing or track is None:
+            await interaction.followup.send("Nothing playing right now.")
+            return
+
+        try:
+            text = await self.subsonic.get_lyrics(track.id)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            text = None
+        if not text:
+            text = await fetch_lrclib(
+                self.http_session, track.artist, track.title, track.album, track.duration
+            )
+        if not text:
+            await interaction.followup.send(
+                f"No lyrics found for **{track.artist} — {track.title}**."
+            )
+            return
+
+        embeds = [
+            discord.Embed(description=chunk, color=self.current_color)
+            for chunk in _chunk_text(text, 4000)[:5]
+        ]
+        embeds[0].set_author(name="Lyrics")
+        await interaction.followup.send(
+            content=f"🎤 **{track.artist} — {track.title}**", embeds=embeds
+        )
+
     def _previous_ended_normally(self) -> bool:
         if self.current_track is None or not self.current_track.duration:
             return False
@@ -327,7 +421,7 @@ class NowPlayingBot(discord.Client):
                     )
                     embed = make_embed(
                         self.config, self.current_track, image_url,
-                        self.current_color, liked,
+                        self.current_color, liked, self.current_share_url,
                     )
                     attachments = []
                     if self.cover_bytes and self.cover_filename:
@@ -350,6 +444,7 @@ class NowPlayingBot(discord.Client):
             self.current_track = None
             self.cover_filename = None
             self.cover_bytes = None
+            self.current_share_url = None
             self.current_liked = False
             self.last_position_ms = 0
             self.now_playing_message = None
@@ -377,6 +472,7 @@ class NowPlayingBot(discord.Client):
         self.cover_bytes = cover_bytes
         self.current_color = dominant_color(cover_bytes, self.config.embed_color)
         self.current_liked = await self._safe_is_starred(song_id)
+        self.current_share_url = await self._safe_create_share(song_id)
         await self._set_presence(track)
 
         file = None
@@ -386,7 +482,10 @@ class NowPlayingBot(discord.Client):
             self.cover_filename = f"cover_{_safe_id(track.id)}.jpg"
             file = discord.File(io.BytesIO(cover_bytes), filename=self.cover_filename)
             image_url = f"attachment://{self.cover_filename}"
-        embed = make_embed(self.config, track, image_url, self.current_color, self.current_liked)
+        embed = make_embed(
+            self.config, track, image_url, self.current_color,
+            self.current_liked, self.current_share_url,
+        )
 
         try:
             if target is not None:
