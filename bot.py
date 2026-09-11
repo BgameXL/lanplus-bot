@@ -22,8 +22,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("navidrome-discord")
 
-_UNSET = object()
-
 
 def _load_state(path: str) -> dict:
     try:
@@ -107,15 +105,14 @@ class NowPlayingBot(discord.Client):
         self.http_session: aiohttp.ClientSession | None = None
         self.subsonic: SubsonicClient | None = None
         self.target_channel: discord.abc.Messageable | None = None
-        self.now_playing_message: discord.Message | None = None
-        self.current_song_id: object | str | None = _UNSET
+        self.current_song_id: str | None = None
         self.current_track: Track | None = None
         self.current_color: int = config.embed_color
-        self.cover_bytes: bytes | None = None
-        self.cover_filename: str | None = None
         self.cover_url: str | None = None
         self.song_started_at: float | None = None
-
+        self.now_playing_message: discord.Message | None = None
+        self._resume_message: discord.Message | None = None
+        self._resume_song_id: str | None = None
         self._restored = False
         self._synced = False
 
@@ -194,11 +191,17 @@ class NowPlayingBot(discord.Client):
                     exc,
                 )
                 return
+        self.target_channel = channel
 
         if not self._restored:
-            await self._restore_message(channel)
             self._restored = True
-        self.target_channel = channel
+            state = _load_state(self.config.state_file)
+            if state.get("channel_id") == channel.id and state.get("message_id"):
+                try:
+                    self._resume_message = await channel.fetch_message(state["message_id"])
+                    self._resume_song_id = state.get("song_id")
+                except discord.NotFound:
+                    self._resume_message = None
 
         guild = getattr(channel, "guild", None)
         if guild is not None and not self._synced:
@@ -213,16 +216,6 @@ class NowPlayingBot(discord.Client):
                     "applications.commands scope): %s",
                     exc,
                 )
-
-    async def _restore_message(self, channel) -> None:
-        state = _load_state(self.config.state_file)
-        if state.get("channel_id") == channel.id and state.get("message_id"):
-            try:
-                self.now_playing_message = await channel.fetch_message(state["message_id"])
-                log.info("Reusing message %s", state["message_id"])
-            except discord.NotFound:
-                log.info("Saved message not found; a new one will be created.")
-                self.now_playing_message = None
 
     def _elapsed(self) -> int:
         if self.song_started_at is None:
@@ -245,63 +238,93 @@ class NowPlayingBot(discord.Client):
         is_playing = track is not None and track.minutes_ago <= self.config.idle_after
         song_id = track.id if (is_playing and track) else None
 
-        if song_id != self.current_song_id or self.now_playing_message is None:
-            await self._on_state_change(track, is_playing, song_id)
-        elif is_playing:
+        if song_id != self.current_song_id:
+            await self._on_song_change(track, is_playing, song_id)
+        elif is_playing and self.now_playing_message is not None:
             embed = make_embed(
-                self.config,
-                self.current_track,
-                self.cover_url,
-                self._elapsed(),
-                self.current_color,
+                self.config, self.current_track, self.cover_url,
+                self._elapsed(), self.current_color,
             )
-            await self._publish(embed, None, new_attachment=False)
+            try:
+                await self.now_playing_message.edit(embed=embed)
+            except discord.NotFound:
+                self.now_playing_message = None
+            except discord.HTTPException as exc:
+                log.warning("HTTP error editing entry: %s", exc)
 
-    async def _on_state_change(self, track, is_playing, song_id) -> None:
+    async def _on_song_change(self, track, is_playing, song_id) -> None:
         self.current_song_id = song_id
-        if is_playing and track:
-            self.song_started_at = time.monotonic() - track.minutes_ago * 60
-            self.current_track = track
-            self.cover_bytes = None
-            self.cover_filename = None
-            if track.cover_art:
-                try:
-                    self.cover_bytes = await self.subsonic.cover_art(
-                        track.cover_art, self.config.cover_size
-                    )
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    log.warning("Couldn't download cover: %s", exc)
-            if self.cover_bytes:
-                self.cover_filename = f"cover_{_safe_id(track.id)}.jpg"
-            self.current_color = dominant_color(self.cover_bytes, self.config.embed_color)
-            await self._set_presence(track)
-            log.info("Now listening: %s - %s", track.artist, track.title)
-        else:
+
+        if not (is_playing and track):
             self.current_track = None
             self.song_started_at = None
-            self.cover_bytes = None
-            self.cover_filename = None
-            self.current_color = self.config.embed_color
+            self.cover_url = None
+            self.now_playing_message = None
             await self._clear_presence()
             log.info("Idle (nothing playing).")
+            return
+
+        self.current_track = track
+        self.song_started_at = time.monotonic() - track.minutes_ago * 60
+
+        cover_bytes = None
+        if track.cover_art:
+            try:
+                cover_bytes = await self.subsonic.cover_art(track.cover_art, self.config.cover_size)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                log.warning("Couldn't download cover: %s", exc)
+        self.current_color = dominant_color(cover_bytes, self.config.embed_color)
+        await self._set_presence(track)
+
+        resume = self._resume_message if (
+                self._resume_message is not None and song_id == self._resume_song_id
+        ) else None
+        self._resume_message = None
+        self._resume_song_id = None
 
         file = None
         image_url = None
-        if self.cover_bytes and self.cover_filename:
-            file = discord.File(io.BytesIO(self.cover_bytes), filename=self.cover_filename)
-            image_url = f"attachment://{self.cover_filename}"
-        embed = make_embed(
-            self.config,
-            self.current_track,
-            image_url,
-            self._elapsed(),
-            self.current_color,
+        if cover_bytes:
+            filename = f"cover_{_safe_id(track.id)}.jpg"
+            file = discord.File(io.BytesIO(cover_bytes), filename=filename)
+            image_url = f"attachment://{filename}"
+        embed = make_embed(self.config, track, image_url, self._elapsed(), self.current_color)
+
+        try:
+            if resume is not None:
+                self.now_playing_message = await resume.edit(
+                    embed=embed, attachments=[file] if file else []
+                )
+            else:
+                kwargs = {"embed": embed}
+                if file is not None:
+                    kwargs["file"] = file
+                self.now_playing_message = await self.target_channel.send(**kwargs)
+        except discord.Forbidden as exc:
+            log.error("No permissions to post in the channel: %s", exc)
+            self.now_playing_message = None
+            return
+        except discord.NotFound:
+            kwargs = {"embed": embed}
+            if file is not None:
+                file = discord.File(io.BytesIO(cover_bytes), filename=f"cover_{_safe_id(track.id)}.jpg")
+                kwargs["file"] = file
+            self.now_playing_message = await self.target_channel.send(**kwargs)
+        except discord.HTTPException as exc:
+            log.warning("HTTP error posting entry: %s", exc)
+            self.now_playing_message = None
+            return
+
+        self.cover_url = (
+            self.now_playing_message.attachments[0].url
+            if self.now_playing_message.attachments else None
         )
-        await self._publish(embed, file, new_attachment=True)
-        if self.now_playing_message and self.now_playing_message.attachments:
-            self.cover_url = self.now_playing_message.attachments[0].url
-        else:
-            self.cover_url = None
+        _save_state(self.config.state_file, {
+            "channel_id": self.target_channel.id,
+            "message_id": self.now_playing_message.id,
+            "song_id": song_id,
+        })
+        log.info("Now listening: %s - %s", track.artist, track.title)
 
     async def _set_presence(self, track: Track) -> None:
         name = f"{track.title} · {track.artist}"[:128]
@@ -321,39 +344,6 @@ class NowPlayingBot(discord.Client):
     @update_now_playing.before_loop
     async def _before_update(self) -> None:
         await self.wait_until_ready()
-
-    async def _publish(
-            self, embed: discord.Embed, file: discord.File | None, new_attachment: bool
-    ) -> bool:
-        channel = self.target_channel
-        try:
-            if self.now_playing_message is None:
-                kwargs = {"embed": embed}
-                if file is not None:
-                    kwargs["file"] = file
-                self.now_playing_message = await channel.send(**kwargs)
-            elif new_attachment:
-                self.now_playing_message = await self.now_playing_message.edit(
-                    embed=embed, attachments=[file] if file else []
-                )
-            else:
-                self.now_playing_message = await self.now_playing_message.edit(embed=embed)
-        except discord.NotFound:
-            self.now_playing_message = None
-            self.current_song_id = _UNSET
-            return False
-        except discord.Forbidden as exc:
-            log.error("No permissions to post in the channel: %s", exc)
-            return False
-        except discord.HTTPException as exc:
-            log.warning("HTTP error posting to Discord: %s", exc)
-            return False
-
-        _save_state(
-            self.config.state_file,
-            {"channel_id": channel.id, "message_id": self.now_playing_message.id},
-        )
-        return True
 
 
 def main() -> None:
