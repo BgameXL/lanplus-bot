@@ -49,17 +49,17 @@ def _mmss(seconds: int) -> str:
 
 def _chunk_text(text: str, size: int) -> list[str]:
     chunks: list[str] = []
-    current = ""
-    for line in text.splitlines():
-        if len(current) + len(line) + 1 > size:
-            if current:
-                chunks.append(current)
-            current = line
+    while len(text) > size:
+        split_at = text.rfind("\n", 0, size)
+        if split_at <= 0:
+            split_at = size
         else:
-            current = f"{current}\n{line}" if current else line
-    if current:
-        chunks.append(current)
-    return [c[:size] for c in chunks] or [text[:size]]
+            split_at += 1
+        chunks.append(text[:split_at])
+        text = text[split_at:]
+    if text:
+        chunks.append(text)
+    return chunks
 
 
 def make_embed(
@@ -304,7 +304,7 @@ class NowPlayingBot(discord.Client):
         if track.cover_art:
             try:
                 cover = await self.subsonic.cover_art(track.cover_art, self.config.cover_size)
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError):
                 pass
 
         color = dominant_color(cover, self.config.embed_color)
@@ -495,7 +495,7 @@ class NowPlayingBot(discord.Client):
         if track.cover_art:
             try:
                 cover = await self.subsonic.cover_art(track.cover_art, self.config.cover_size)
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError):
                 pass
         color = dominant_color(cover, self.config.embed_color)
 
@@ -537,14 +537,15 @@ class NowPlayingBot(discord.Client):
             )
             return
 
-        embeds = [
-            discord.Embed(description=chunk, color=self.current_color)
-            for chunk in _chunk_text(text, 4000)[:5]
-        ]
-        embeds[0].set_author(name="Lyrics")
-        await interaction.followup.send(
-            content=f"**{track.artist} — {track.title}**", embeds=embeds
-        )
+        for page, chunk in enumerate(_chunk_text(text, 4000)):
+            embed = discord.Embed(description=chunk, color=self.current_color)
+            if page == 0:
+                embed.set_author(name="Lyrics")
+                await interaction.followup.send(
+                    content=f"**{track.artist} — {track.title}**", embed=embed
+                )
+            else:
+                await interaction.followup.send(embed=embed)
 
     def _previous_ended_normally(self) -> bool:
         if self.current_track is None or not self.current_track.duration:
@@ -596,9 +597,8 @@ class NowPlayingBot(discord.Client):
                         log.warning("HTTP error editing entry: %s", exc)
 
     async def _on_song_change(self, track, is_playing, song_id, ended_normally) -> None:
-        self.current_song_id = song_id
-
         if not (is_playing and track):
+            self.current_song_id = None
             self.current_track = None
             self.cover_filename = None
             self.cover_bytes = None
@@ -619,18 +619,20 @@ class NowPlayingBot(discord.Client):
         if target is None and ended_normally and self.now_playing_message is not None:
             target = self.now_playing_message
 
+        retrying_song = self.current_track is not None and self.current_track.id == song_id
         self.current_track = track
         self.last_position_ms = track.position_ms
         cover_bytes = None
         if track.cover_art:
             try:
                 cover_bytes = await self.subsonic.cover_art(track.cover_art, self.config.cover_size)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 log.warning("Couldn't download cover: %s", exc)
         self.cover_bytes = cover_bytes
         self.current_color = dominant_color(cover_bytes, self.config.embed_color)
         self.current_liked = await self._safe_is_starred(song_id)
-        self.current_share_url = await self._safe_create_share(song_id)
+        if not retrying_song:
+            self.current_share_url = await self._safe_create_share(song_id)
         await self._set_presence(track)
 
         file = None
@@ -647,9 +649,17 @@ class NowPlayingBot(discord.Client):
 
         try:
             if target is not None:
-                self.now_playing_message = await target.edit(
-                    embed=embed, attachments=[file] if file else []
-                )
+                try:
+                    self.now_playing_message = await target.edit(
+                        embed=embed, attachments=[file] if file else []
+                    )
+                except discord.NotFound:
+                    kwargs = {"embed": embed}
+                    if cover_bytes:
+                        kwargs["file"] = discord.File(
+                            io.BytesIO(cover_bytes), filename=self.cover_filename or "cover.jpg"
+                        )
+                    self.now_playing_message = await self.target_channel.send(**kwargs)
             else:
                 kwargs = {"embed": embed}
                 if file is not None:
@@ -659,18 +669,12 @@ class NowPlayingBot(discord.Client):
             log.error("No permissions to post in the channel: %s", exc)
             self.now_playing_message = None
             return
-        except discord.NotFound:
-            kwargs = {"embed": embed}
-            if cover_bytes:
-                kwargs["file"] = discord.File(
-                    io.BytesIO(cover_bytes), filename=self.cover_filename or "cover.jpg"
-                )
-            self.now_playing_message = await self.target_channel.send(**kwargs)
         except discord.HTTPException as exc:
             log.warning("HTTP error posting entry: %s", exc)
             self.now_playing_message = None
             return
 
+        self.current_song_id = song_id
         _save_state(self.config.state_file, {
             "channel_id": self.target_channel.id,
             "message_id": self.now_playing_message.id,

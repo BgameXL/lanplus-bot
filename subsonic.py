@@ -64,9 +64,12 @@ class SubsonicClient:
         if extra:
             params.update(extra)
         url = f"{self._base}/rest/{endpoint}"
-        async with self._session.get(url, params=params, timeout=self._timeout) as resp:
-            resp.raise_for_status()
-            data = await resp.json(content_type=None)
+        try:
+            async with self._session.get(url, params=params, timeout=self._timeout) as resp:
+                resp.raise_for_status()
+                data = await resp.json(content_type=None)
+        except aiohttp.ClientResponseError as exc:
+            raise SubsonicError(f"{endpoint} failed with HTTP {exc.status}") from None
         body = data.get("subsonic-response", {})
         if body.get("status") != "ok":
             error = body.get("error", {})
@@ -97,12 +100,17 @@ class SubsonicClient:
         if size and size > 0:
             params["size"] = str(size)
         url = f"{self._base}/rest/getCoverArt.view"
-        async with self._session.get(url, params=params, timeout=self._timeout) as resp:
-            resp.raise_for_status()
-            content_type = resp.headers.get("Content-Type", "")
-            if not content_type.startswith("image/"):
-                return None
-            return await resp.read()
+        try:
+            async with self._session.get(url, params=params, timeout=self._timeout) as resp:
+                resp.raise_for_status()
+                content_type = resp.headers.get("Content-Type", "")
+                if not content_type.startswith("image/"):
+                    return None
+                return await resp.read()
+        except aiohttp.ClientResponseError as exc:
+            raise SubsonicError(
+                f"getCoverArt.view failed with HTTP {exc.status}"
+            ) from None
 
     async def get_song(self, song_id: str) -> dict:
         body = await self._get_json("getSong.view", {"id": song_id})
