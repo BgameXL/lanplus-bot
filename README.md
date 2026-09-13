@@ -41,14 +41,12 @@ Discord bot that posts what you are listening to on Navidrome.
 
 ## Run
 
-```bash
-.venv/bin/python check.py
-```
-
 Local:
 
 ```bash
+python -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python check.py
 .venv/bin/python bot.py
 ```
 

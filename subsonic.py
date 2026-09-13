@@ -26,7 +26,7 @@ class Track:
     username: str
     minutes_ago: int
     player_name: str | None
-    position_ms: int = 0
+    position_ms: int | None = None
 
 
 class SubsonicClient:
@@ -124,20 +124,14 @@ class SubsonicClient:
         extra = {"id": song_id}
         if expires_ms:
             extra["expires"] = str(expires_ms)
-        try:
-            body = await self._get_json("createShare.view", extra)
-        except SubsonicError:
-            return None
+        body = await self._get_json("createShare.view", extra)
         shares = (body.get("shares") or {}).get("share") or []
         if isinstance(shares, dict):
             shares = [shares]
         return shares[0].get("url") if shares else None
 
     async def get_lyrics(self, song_id: str) -> str | None:
-        try:
-            body = await self._get_json("getLyricsBySongId.view", {"id": song_id})
-        except SubsonicError:
-            return None
+        body = await self._get_json("getLyricsBySongId.view", {"id": song_id})
         structured = (body.get("lyricsList") or {}).get("structuredLyrics") or []
         if not structured:
             return None
@@ -186,5 +180,5 @@ class SubsonicClient:
             username=entry.get("username") or "",
             minutes_ago=_as_int(entry.get("minutesAgo")) or 0,
             player_name=entry.get("playerName"),
-            position_ms=_as_int(entry.get("positionMs")) or 0,
+            position_ms=_as_int(entry.get("positionMs")),
         )
