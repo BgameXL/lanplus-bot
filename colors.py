@@ -3,14 +3,11 @@ from __future__ import annotations
 import colorsys
 import io
 
-try:
-    from PIL import Image
-except ImportError:
-    Image = None
+from PIL import Image
 
 
 def dominant_color(image_bytes: bytes | None, default: int) -> int:
-    if not image_bytes or Image is None:
+    if not image_bytes:
         return default
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -18,14 +15,19 @@ def dominant_color(image_bytes: bytes | None, default: int) -> int:
         quant = img.quantize(colors=8)
         palette = quant.getpalette() or []
         counts = quant.getcolors() or []
-    except Exception:
+    except (OSError, ValueError, Image.DecompressionBombError):
         return default
 
     if not counts or not palette:
         return default
 
     total = sum(count for count, _ in counts) or 1
-    best_rgb: tuple[int, int, int] | None = None
+    first_color = counts[0][1] * 3
+    best_rgb = (
+        palette[first_color],
+        palette[first_color + 1],
+        palette[first_color + 2],
+    )
     best_score = -1.0
 
     for count, idx in counts:
@@ -39,10 +41,6 @@ def dominant_color(image_bytes: bytes | None, default: int) -> int:
         if score > best_score:
             best_score = score
             best_rgb = (r, g, b)
-
-    if best_rgb is None:
-        count, idx = counts[0]
-        best_rgb = tuple(palette[idx * 3: idx * 3 + 3])
 
     r, g, b = best_rgb
     return (r << 16) | (g << 8) | b

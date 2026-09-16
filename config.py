@@ -25,19 +25,25 @@ def _parse_color(raw: str | None, default: int = 0x5865F2) -> int:
     if cleaned.startswith("0x"):
         cleaned = cleaned[2:]
     try:
-        return int(cleaned, 16)
+        color = int(cleaned, 16)
     except ValueError:
-        return default
+        raise SystemExit(f"EMBED_COLOR needs to be a hexadecimal RGB color (got: {raw!r}).")
+    if not 0 <= color <= 0xFFFFFF:
+        raise SystemExit(f"EMBED_COLOR needs to be between 000000 and FFFFFF (got: {raw!r}).")
+    return color
 
 
-def _parse_int(name: str, default: int) -> int:
+def _parse_int(name: str, default: int, minimum: int = 0) -> int:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
         raise SystemExit(f"{name} needs to be an integer (got: {raw!r}).")
+    if value < minimum:
+        raise SystemExit(f"{name} needs to be at least {minimum} (got: {value}).")
+    return value
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,8 @@ def load_config() -> Config:
         channel_id = int(channel_raw)
     except ValueError:
         raise SystemExit("DISCORD_CHANNEL_ID needs to be the numeric ID of the channel.")
+    if channel_id <= 0:
+        raise SystemExit("DISCORD_CHANNEL_ID needs to be a positive integer.")
 
     user = _required("NAVIDROME_USER")
 
@@ -76,10 +84,10 @@ def load_config() -> Config:
         navidrome_pass=_required("NAVIDROME_PASS"),
         username_filter=os.getenv("NAVIDROME_USERNAME_FILTER") or user,
         display_name=os.getenv("DISPLAY_NAME") or os.getenv("NAVIDROME_USERNAME_FILTER") or user,
-        poll_interval=max(5, _parse_int("POLL_INTERVAL", 15)),
+        poll_interval=_parse_int("POLL_INTERVAL", 15, minimum=5),
         idle_after=_parse_int("IDLE_AFTER_MINUTES", 10),
         embed_color=_parse_color(os.getenv("EMBED_COLOR")),
         cover_size=_parse_int("COVER_SIZE", 1000),
         share_expires_days=_parse_int("SHARE_EXPIRES_DAYS", 0),
-        state_file=os.getenv("STATE_FILE", "state.json"),
+        state_file=os.getenv("STATE_FILE") or "state.json",
     )

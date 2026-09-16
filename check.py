@@ -25,7 +25,11 @@ async def run() -> None:
             return
         print("Connection and credentials OK.")
 
-        track = await client.now_playing(config.username_filter)
+        try:
+            track = await client.now_playing(config.username_filter)
+        except (SubsonicError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            print(f"X Connected, but could not check what's playing: {exc}")
+            return
         if track is None:
             print(
                 "Currently nothing is playing "

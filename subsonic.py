@@ -116,6 +116,16 @@ class SubsonicClient:
         body = await self._get_json("getSong.view", {"id": song_id})
         return body.get("song") or {}
 
+    async def download(self, song_id: str) -> bytes:
+        params = self._auth_params()
+        params["id"] = song_id
+        url = f"{self._base}/rest/download.view"
+        async with self._session.get(
+            url, params=params, timeout=aiohttp.ClientTimeout(total=300)
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.read()
+
     async def is_starred(self, song_id: str) -> bool:
         song = await self.get_song(song_id)
         return bool(song.get("starred"))

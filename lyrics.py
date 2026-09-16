@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 import aiohttp
 
 _BASE = "https://lrclib.net"
@@ -29,29 +27,23 @@ async def fetch_lrclib(
         params["album_name"] = album
     if duration:
         params["duration"] = str(duration)
-    try:
-        async with session.get(
-                f"{_BASE}/api/get", params=params, headers=headers, timeout=_TIMEOUT
-        ) as resp:
-            if resp.status == 200:
-                text = _plain(await resp.json())
+    async with session.get(
+            f"{_BASE}/api/get", params=params, headers=headers, timeout=_TIMEOUT
+    ) as resp:
+        if resp.status == 200:
+            text = _plain(await resp.json())
+            if text:
+                return text
+    async with session.get(
+            f"{_BASE}/api/search",
+            params={"track_name": title, "artist_name": artist},
+            headers=headers,
+            timeout=_TIMEOUT,
+    ) as resp:
+        if resp.status == 200:
+            for entry in (await resp.json()) or []:
+                text = _plain(entry)
                 if text:
                     return text
-    except (aiohttp.ClientError, asyncio.TimeoutError):
-        pass
-    try:
-        async with session.get(
-                f"{_BASE}/api/search",
-                params={"track_name": title, "artist_name": artist},
-                headers=headers,
-                timeout=_TIMEOUT,
-        ) as resp:
-            if resp.status == 200:
-                for entry in (await resp.json()) or []:
-                    text = _plain(entry)
-                    if text:
-                        return text
-    except (aiohttp.ClientError, asyncio.TimeoutError):
-        pass
 
     return None
