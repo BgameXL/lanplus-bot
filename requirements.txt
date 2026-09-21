@@ -2,3 +2,4 @@ discord.py>=2.4,<3
 python-dotenv>=1.0
 aiohttp>=3.9
 Pillow>=10.0
+pypresence>=4.3
