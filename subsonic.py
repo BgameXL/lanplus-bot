@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -27,6 +28,7 @@ class Track:
     minutes_ago: int
     player_name: str | None
     position_ms: int | None = None
+    state: str | None = None
 
 
 class SubsonicClient:
@@ -112,6 +114,12 @@ class SubsonicClient:
                 f"getCoverArt.view failed with HTTP {exc.status}"
             ) from None
 
+    def cover_art_url(self, cover_id: str, size: int = 512) -> str:
+        params = self._auth_params()
+        params["id"] = cover_id
+        params["size"] = str(size)
+        return f"{self._base}/rest/getCoverArt.view?{urlencode(params)}"
+
     async def get_song(self, song_id: str) -> dict:
         body = await self._get_json("getSong.view", {"id": song_id})
         return body.get("song") or {}
@@ -121,7 +129,7 @@ class SubsonicClient:
         params["id"] = song_id
         url = f"{self._base}/rest/download.view"
         async with self._session.get(
-            url, params=params, timeout=aiohttp.ClientTimeout(total=300)
+                url, params=params, timeout=aiohttp.ClientTimeout(total=300)
         ) as resp:
             resp.raise_for_status()
             return await resp.read()
@@ -191,4 +199,5 @@ class SubsonicClient:
             minutes_ago=_as_int(entry.get("minutesAgo")) or 0,
             player_name=entry.get("playerName"),
             position_ms=_as_int(entry.get("positionMs")),
+            state=entry.get("state"),
         )

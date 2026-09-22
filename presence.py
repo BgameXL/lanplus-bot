@@ -58,26 +58,30 @@ async def run() -> None:
                 track = None
 
             playing = track is not None and track.minutes_ago <= idle_after
-            key = track.id if playing else None
+            key = (track.id, track.state) if playing else None
 
             if key != current:
                 current = key
                 try:
                     if playing:
-                        start = (
-                            int(time.time() - track.position_ms / 1000)
-                            if track.position_ms
-                            else int(time.time())
-                        )
                         fields = {
                             "activity_type": 2,
                             "details": track.title,
                             "state": track.artist,
-                            "start": start,
                         }
-                        if track.duration:
-                            fields["end"] = start + track.duration
-                        if large_image:
+                        if track.state != "paused":
+                            start = (
+                                int(time.time() - track.position_ms / 1000)
+                                if track.position_ms
+                                else int(time.time())
+                            )
+                            fields["start"] = start
+                            if track.duration:
+                                fields["end"] = start + track.duration
+                        if track.cover_art:
+                            fields["large_image"] = subsonic.cover_art_url(track.cover_art)
+                            fields["large_text"] = track.album or track.title
+                        elif large_image:
                             fields["large_image"] = large_image
                             fields["large_text"] = track.album or track.title
                         await rpc.update(**fields)
